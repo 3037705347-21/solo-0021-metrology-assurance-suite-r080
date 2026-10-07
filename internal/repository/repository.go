@@ -14,6 +14,8 @@ type Repository struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	plans        map[string]domain.CalibrationPlan
+	schedules    map[string]domain.CalibrationSchedule
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -24,6 +26,8 @@ func New() *Repository {
 		cases:        make(map[string]domain.VerificationCase),
 		measurements: make(map[string][]domain.Measurement),
 		seals:        make(map[string]domain.EvidenceSeal),
+		plans:        make(map[string]domain.CalibrationPlan),
+		schedules:    make(map[string]domain.CalibrationSchedule),
 		counters:     make(map[string]int),
 	}
 }
@@ -33,6 +37,8 @@ type Snapshot struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	plans        map[string]domain.CalibrationPlan
+	schedules    map[string]domain.CalibrationSchedule
 	events       []domain.AuditEvent
 }
 
@@ -74,6 +80,44 @@ func (s Snapshot) Events(caseID string) []domain.AuditEvent {
 	return result
 }
 
+func (s Snapshot) SubjectEvents(subjectType, subjectID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range s.events {
+		if item.SubjectType == subjectType && item.SubjectID == subjectID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func (s Snapshot) Plan(id string) (domain.CalibrationPlan, bool) {
+	item, ok := s.plans[id]
+	return item, ok
+}
+
+func (s Snapshot) AllPlans() []domain.CalibrationPlan {
+	result := make([]domain.CalibrationPlan, 0, len(s.plans))
+	for _, item := range s.plans {
+		result = append(result, item)
+	}
+	return result
+}
+
+func (s Snapshot) Schedule(id string) (domain.CalibrationSchedule, bool) {
+	item, ok := s.schedules[id]
+	return item, ok
+}
+
+func (s Snapshot) SchedulesForPlan(planID string) []domain.CalibrationSchedule {
+	var result []domain.CalibrationSchedule
+	for _, item := range s.schedules {
+		if item.PlanID == planID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 func (s Snapshot) AllDevices() []domain.Device {
 	result := make([]domain.Device, 0, len(s.devices))
 	for _, item := range s.devices {
@@ -95,6 +139,8 @@ type Mutation struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	plans        map[string]domain.CalibrationPlan
+	schedules    map[string]domain.CalibrationSchedule
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -203,6 +249,86 @@ func (m *Mutation) Events(caseID string) []domain.AuditEvent {
 	return result
 }
 
+func (m *Mutation) SubjectEvents(subjectType, subjectID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range m.events {
+		if item.SubjectType == subjectType && item.SubjectID == subjectID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func (m *Mutation) Plan(id string) (domain.CalibrationPlan, bool) {
+	item, ok := m.plans[id]
+	return item, ok
+}
+
+func (m *Mutation) PutPlan(item domain.CalibrationPlan) error {
+	if _, exists := m.plans[item.ID]; exists {
+		return fmt.Errorf("%w: plan %s", domain.ErrStateConflict, item.ID)
+	}
+	m.plans[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) UpdatePlan(item domain.CalibrationPlan) error {
+	if _, exists := m.plans[item.ID]; !exists {
+		return fmt.Errorf("%w: plan %s", domain.ErrNotFound, item.ID)
+	}
+	m.plans[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) UnfinishedPlanForDevice(deviceID string) (domain.CalibrationPlan, bool) {
+	for _, item := range m.plans {
+		if item.DeviceID == deviceID && item.IsUnfinished() {
+			return item, true
+		}
+	}
+	return domain.CalibrationPlan{}, false
+}
+
+func (m *Mutation) Schedule(id string) (domain.CalibrationSchedule, bool) {
+	item, ok := m.schedules[id]
+	return item, ok
+}
+
+func (m *Mutation) PutSchedule(item domain.CalibrationSchedule) error {
+	if _, exists := m.schedules[item.ID]; exists {
+		return fmt.Errorf("%w: schedule %s", domain.ErrStateConflict, item.ID)
+	}
+	m.schedules[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) UpdateSchedule(item domain.CalibrationSchedule) error {
+	if _, exists := m.schedules[item.ID]; !exists {
+		return fmt.Errorf("%w: schedule %s", domain.ErrNotFound, item.ID)
+	}
+	m.schedules[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) SchedulesForPlan(planID string) []domain.CalibrationSchedule {
+	var result []domain.CalibrationSchedule
+	for _, item := range m.schedules {
+		if item.PlanID == planID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func (m *Mutation) ActiveScheduleForPlan(planID string) (domain.CalibrationSchedule, bool) {
+	for _, item := range m.schedules {
+		if item.PlanID == planID && item.IsActive() {
+			return item, true
+		}
+	}
+	return domain.CalibrationSchedule{}, false
+}
+
 func (r *Repository) Read(ctx context.Context, fn func(Snapshot) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -224,6 +350,8 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		plans:        clonePlans(r.plans),
+		schedules:    cloneSchedules(r.schedules),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 		counters:     cloneCounters(r.counters),
 	}
@@ -234,6 +362,8 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.cases = next.cases
 	r.measurements = next.measurements
 	r.seals = next.seals
+	r.plans = next.plans
+	r.schedules = next.schedules
 	r.events = next.events
 	r.counters = next.counters
 	return nil
@@ -245,6 +375,8 @@ func (r *Repository) snapshot() Snapshot {
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		plans:        clonePlans(r.plans),
+		schedules:    cloneSchedules(r.schedules),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 	}
 }
@@ -275,6 +407,22 @@ func cloneMeasurements(values map[string][]domain.Measurement) map[string][]doma
 
 func cloneSeals(values map[string]domain.EvidenceSeal) map[string]domain.EvidenceSeal {
 	result := make(map[string]domain.EvidenceSeal, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func clonePlans(values map[string]domain.CalibrationPlan) map[string]domain.CalibrationPlan {
+	result := make(map[string]domain.CalibrationPlan, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneSchedules(values map[string]domain.CalibrationSchedule) map[string]domain.CalibrationSchedule {
+	result := make(map[string]domain.CalibrationSchedule, len(values))
 	for key, value := range values {
 		result[key] = value
 	}

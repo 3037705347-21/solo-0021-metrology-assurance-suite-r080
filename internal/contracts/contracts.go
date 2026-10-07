@@ -1,6 +1,10 @@
 package contracts
 
-import "example.com/solo-0021-metrology-assurance-suite/internal/domain"
+import (
+	"time"
+
+	"example.com/solo-0021-metrology-assurance-suite/internal/domain"
+)
 
 type RegisterDeviceRequest struct {
 	AssetTag string `json:"asset_tag"`
@@ -31,6 +35,37 @@ type SealCaseRequest struct {
 	Summary  string `json:"summary"`
 }
 
+type CreatePlanRequest struct {
+	DeviceID        string    `json:"device_id"`
+	Basis           string    `json:"basis"`
+	BasisValidUntil time.Time `json:"basis_valid_until"`
+	WindowStart     time.Time `json:"window_start"`
+	WindowEnd       time.Time `json:"window_end"`
+	Owner           string    `json:"owner"`
+}
+
+type RevisePlanRequest struct {
+	Basis           string    `json:"basis"`
+	BasisValidUntil time.Time `json:"basis_valid_until"`
+	WindowStart     time.Time `json:"window_start"`
+	WindowEnd       time.Time `json:"window_end"`
+	Owner           string    `json:"owner"`
+}
+
+type CreateScheduleRequest struct {
+	Assignee     string    `json:"assignee"`
+	ScheduledFor time.Time `json:"scheduled_for"`
+}
+
+type CompleteScheduleRequest struct {
+	CaseID string `json:"case_id"`
+}
+
+type CancelScheduleRequest struct {
+	Actor  string `json:"actor"`
+	Reason string `json:"reason"`
+}
+
 type DeviceResponse struct {
 	Device domain.Device `json:"device"`
 }
@@ -44,6 +79,28 @@ type CaseResponse struct {
 
 type EventsResponse struct {
 	Events []domain.AuditEvent `json:"events"`
+}
+
+// PlanView explains the derived plan status next to the stored plan and its
+// schedule history, so stewards can see pending, scheduled, overdue, and
+// completed work without interpreting raw timestamps.
+type PlanView struct {
+	Plan              domain.CalibrationPlan       `json:"plan"`
+	Status            domain.PlanStatus            `json:"status"`
+	StatusExplanation string                       `json:"status_explanation"`
+	Schedules         []domain.CalibrationSchedule `json:"schedules"`
+}
+
+type PlanResponse struct {
+	Plan              domain.CalibrationPlan       `json:"plan"`
+	Status            domain.PlanStatus            `json:"status"`
+	StatusExplanation string                       `json:"status_explanation"`
+	Schedules         []domain.CalibrationSchedule `json:"schedules"`
+	Events            []domain.AuditEvent          `json:"events"`
+}
+
+type PlanListResponse struct {
+	Plans []PlanView `json:"plans"`
 }
 
 type ErrorResponse struct {

@@ -106,3 +106,101 @@ func (s *Server) events(writer http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
 }
+
+func (s *Server) createPlan(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CreatePlanRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CreatePlan(request.Context(), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) plans(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	view, err := s.service.Plans(request.Context(), query.Get("device_id"), query.Get("status"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) planView(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.Plan(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) revisePlan(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RevisePlanRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.RevisePlan(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) createSchedule(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CreateScheduleRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CreateSchedule(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) planEvents(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.Plan(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
+}
+
+func (s *Server) completeSchedule(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CompleteScheduleRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CompleteSchedule(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) cancelSchedule(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CancelScheduleRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CancelSchedule(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}

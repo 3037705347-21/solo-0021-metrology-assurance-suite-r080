@@ -40,6 +40,7 @@ func main() {
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
 		"seal-verification":        checkSealVerification,
+		"calibration-planning":     checkCalibrationPlanning,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -375,6 +376,376 @@ func checkSealVerification() error {
 	return nil
 }
 
+func checkCalibrationPlanning() error {
+	h := newHarness()
+	defer h.close()
+	now := time.Now().UTC()
+
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	accepted, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(accepted, http.StatusCreated); err != nil {
+		return err
+	}
+
+	plan, err := h.createPlan(deviceID, now.Add(1*time.Hour), now.Add(24*time.Hour), now.Add(48*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(plan, http.StatusCreated); err != nil {
+		return err
+	}
+	if err := expectPlanStatus(plan, "pending"); err != nil {
+		return err
+	}
+	explanation, err := nestedString(plan.Body, "status_explanation")
+	if err != nil {
+		return err
+	}
+	if explanation == "" {
+		return errors.New("pending plan has no status explanation")
+	}
+	planID, err := nestedString(plan.Body, "plan", "id")
+	if err != nil {
+		return err
+	}
+
+	duplicate, err := h.createPlan(deviceID, now.Add(1*time.Hour), now.Add(24*time.Hour), now.Add(48*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "active_plan_exists"); err != nil {
+		return err
+	}
+
+	blocked, err := h.createSchedule(planID, now.Add(12*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blocked, "active_case_exists"); err != nil {
+		return err
+	}
+
+	if err := h.sealCase(caseID); err != nil {
+		return err
+	}
+	scheduled, err := h.createSchedule(planID, now.Add(12*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(scheduled, http.StatusCreated); err != nil {
+		return err
+	}
+	if err := expectPlanStatus(scheduled, "scheduled"); err != nil {
+		return err
+	}
+	scheduleID, err := nestedStringAt(scheduled.Body, "schedules", 0, "id")
+	if err != nil {
+		return err
+	}
+
+	second, err := h.createSchedule(planID, now.Add(13*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(second, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(second, "active_schedule_exists"); err != nil {
+		return err
+	}
+
+	otherCaseID, err := h.sealedCase("MET-1599")
+	if err != nil {
+		return err
+	}
+	mismatch, err := h.completeSchedule(scheduleID, otherCaseID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(mismatch, http.StatusBadRequest); err != nil {
+		return err
+	}
+	if err := expectErrorCode(mismatch, "invalid_input"); err != nil {
+		return err
+	}
+
+	completed, err := h.completeSchedule(scheduleID, caseID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(completed, http.StatusOK); err != nil {
+		return err
+	}
+	if err := expectPlanStatus(completed, "completed"); err != nil {
+		return err
+	}
+	onTime, err := nestedBool(completed.Body, "schedules", 0, "on_time")
+	if err != nil {
+		return err
+	}
+	if !onTime {
+		return errors.New("schedule completed inside the window was not on time")
+	}
+
+	revised, err := h.revisePlan(planID, now.Add(2*time.Hour), now.Add(20*time.Hour), now.Add(48*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(revised, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(revised, "state_conflict"); err != nil {
+		return err
+	}
+
+	// A plan revision must not rewrite the snapshot window of an existing
+	// schedule: the historical on-time arrangement stays on time.
+	plan2, err := h.createPlan(deviceID, now.Add(1*time.Hour), now.Add(48*time.Hour), now.Add(72*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(plan2, http.StatusCreated); err != nil {
+		return err
+	}
+	plan2ID, err := nestedString(plan2.Body, "plan", "id")
+	if err != nil {
+		return err
+	}
+	scheduled2, err := h.createSchedule(plan2ID, now.Add(24*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(scheduled2, http.StatusCreated); err != nil {
+		return err
+	}
+	snapshotEnd, err := nestedStringAt(scheduled2.Body, "schedules", 0, "window_end")
+	if err != nil {
+		return err
+	}
+	revised2, err := h.revisePlan(plan2ID, now.Add(1*time.Hour), now.Add(12*time.Hour), now.Add(72*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(revised2, http.StatusOK); err != nil {
+		return err
+	}
+	reread, err := h.request(http.MethodGet, "/plans/"+plan2ID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reread, http.StatusOK); err != nil {
+		return err
+	}
+	keptEnd, err := nestedStringAt(reread.Body, "schedules", 0, "window_end")
+	if err != nil {
+		return err
+	}
+	if keptEnd != snapshotEnd {
+		return fmt.Errorf("plan revision rewrote schedule window: %q became %q", snapshotEnd, keptEnd)
+	}
+	if err := expectPlanStatus(reread, "scheduled"); err != nil {
+		return err
+	}
+
+	// A plan whose window has closed without completion is explained as
+	// overdue, and a lapsed basis blocks any new schedule.
+	device2ID, err := h.createDevice("MET-1502")
+	if err != nil {
+		return err
+	}
+	badWindow, err := h.createPlan(device2ID, now.Add(24*time.Hour), now.Add(1*time.Hour), now.Add(48*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(badWindow, http.StatusBadRequest); err != nil {
+		return err
+	}
+	if err := expectErrorCode(badWindow, "invalid_input"); err != nil {
+		return err
+	}
+	beyondBasis, err := h.createPlan(device2ID, now.Add(1*time.Hour), now.Add(48*time.Hour), now.Add(24*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(beyondBasis, http.StatusBadRequest); err != nil {
+		return err
+	}
+	if err := expectErrorCode(beyondBasis, "invalid_input"); err != nil {
+		return err
+	}
+
+	overdue, err := h.createPlan(device2ID, now.Add(-48*time.Hour), now.Add(-2*time.Hour), now.Add(-2*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(overdue, http.StatusCreated); err != nil {
+		return err
+	}
+	if err := expectPlanStatus(overdue, "overdue"); err != nil {
+		return err
+	}
+	overduePlanID, err := nestedString(overdue.Body, "plan", "id")
+	if err != nil {
+		return err
+	}
+	lapsed, err := h.createSchedule(overduePlanID, now.Add(1*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(lapsed, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(lapsed, "basis_expired"); err != nil {
+		return err
+	}
+
+	overdueList, err := h.request(http.MethodGet, "/plans?status=overdue", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(overdueList, http.StatusOK); err != nil {
+		return err
+	}
+	overduePlans, err := nestedSlice(overdueList.Body, "plans")
+	if err != nil {
+		return err
+	}
+	if len(overduePlans) != 1 {
+		return fmt.Errorf("overdue list has %d plans, expected 1", len(overduePlans))
+	}
+	devicePlans, err := h.request(http.MethodGet, "/plans?device_id="+deviceID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(devicePlans, http.StatusOK); err != nil {
+		return err
+	}
+	devicePlanList, err := nestedSlice(devicePlans.Body, "plans")
+	if err != nil {
+		return err
+	}
+	if len(devicePlanList) != 2 {
+		return fmt.Errorf("device plan list has %d plans, expected 2", len(devicePlanList))
+	}
+	badFilter, err := h.request(http.MethodGet, "/plans?status=bogus", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(badFilter, http.StatusBadRequest); err != nil {
+		return err
+	}
+
+	// Revising the overdue plan with a valid basis and window makes it
+	// schedulable again; cancellation returns it to pending.
+	revised3, err := h.revisePlan(overduePlanID, now.Add(1*time.Hour), now.Add(24*time.Hour), now.Add(48*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(revised3, http.StatusOK); err != nil {
+		return err
+	}
+	if err := expectPlanStatus(revised3, "pending"); err != nil {
+		return err
+	}
+	scheduled3, err := h.createSchedule(overduePlanID, now.Add(12*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(scheduled3, http.StatusCreated); err != nil {
+		return err
+	}
+	schedule3ID, err := nestedStringAt(scheduled3.Body, "schedules", 0, "id")
+	if err != nil {
+		return err
+	}
+	cancelled, err := h.request(http.MethodPost, "/schedules/"+schedule3ID+"/cancel", map[string]any{
+		"actor":  "Lin",
+		"reason": "assignee unavailable in this window",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(cancelled, http.StatusOK); err != nil {
+		return err
+	}
+	if err := expectPlanStatus(cancelled, "pending"); err != nil {
+		return err
+	}
+	scheduled4, err := h.createSchedule(overduePlanID, now.Add(12*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(scheduled4, http.StatusCreated); err != nil {
+		return err
+	}
+	schedule4ID, err := nestedStringAt(scheduled4.Body, "schedules", 1, "id")
+	if err != nil {
+		return err
+	}
+	opened2, err := h.openCase(device2ID)
+	if err != nil {
+		return err
+	}
+	case2ID, err := nestedString(opened2.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	accepted2, err := h.recordMeasurement(case2ID, 25.1, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(accepted2, http.StatusCreated); err != nil {
+		return err
+	}
+	if err := h.sealCase(case2ID); err != nil {
+		return err
+	}
+	completed2, err := h.completeSchedule(schedule4ID, case2ID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(completed2, http.StatusOK); err != nil {
+		return err
+	}
+	if err := expectPlanStatus(completed2, "completed"); err != nil {
+		return err
+	}
+
+	events, err := h.request(http.MethodGet, "/plans/"+overduePlanID+"/events", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(events, http.StatusOK); err != nil {
+		return err
+	}
+	for _, kind := range []string{"plan_created", "plan_revised", "schedule_created", "schedule_cancelled", "schedule_completed"} {
+		if !hasEvent(events.Body, kind) {
+			return fmt.Errorf("plan audit event %q is missing", kind)
+		}
+	}
+	return nil
+}
+
 func newHarness() *harness {
 	server := httptest.NewServer(bootstrap.NewHandler())
 	return &harness{
@@ -463,6 +834,73 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 	})
 }
 
+func (h *harness) sealCase(caseID string) error {
+	response, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Wei",
+		"summary":  "accepted measurement sealed for review",
+	})
+	if err != nil {
+		return err
+	}
+	return expectStatus(response, http.StatusCreated)
+}
+
+func (h *harness) sealedCase(tag string) (string, error) {
+	caseID, err := h.readyCase(tag)
+	if err != nil {
+		return "", err
+	}
+	if err := h.sealCase(caseID); err != nil {
+		return "", err
+	}
+	return caseID, nil
+}
+
+func (h *harness) createPlan(deviceID string, windowStart, windowEnd, basisUntil time.Time) (apiResponse, error) {
+	return h.request(http.MethodPost, "/plans", map[string]any{
+		"device_id":         deviceID,
+		"basis":             "JJG 123-2020",
+		"basis_valid_until": basisUntil.Format(time.RFC3339),
+		"window_start":      windowStart.Format(time.RFC3339),
+		"window_end":        windowEnd.Format(time.RFC3339),
+		"owner":             "Lin",
+	})
+}
+
+func (h *harness) revisePlan(planID string, windowStart, windowEnd, basisUntil time.Time) (apiResponse, error) {
+	return h.request(http.MethodPost, "/plans/"+planID+"/revise", map[string]any{
+		"basis":             "JJG 123-2020",
+		"basis_valid_until": basisUntil.Format(time.RFC3339),
+		"window_start":      windowStart.Format(time.RFC3339),
+		"window_end":        windowEnd.Format(time.RFC3339),
+		"owner":             "Lin",
+	})
+}
+
+func (h *harness) createSchedule(planID string, scheduledFor time.Time) (apiResponse, error) {
+	return h.request(http.MethodPost, "/plans/"+planID+"/schedules", map[string]any{
+		"assignee":      "Rui",
+		"scheduled_for": scheduledFor.Format(time.RFC3339),
+	})
+}
+
+func (h *harness) completeSchedule(scheduleID, caseID string) (apiResponse, error) {
+	return h.request(http.MethodPost, "/schedules/"+scheduleID+"/complete", map[string]any{
+		"case_id": caseID,
+	})
+}
+
+func expectPlanStatus(response apiResponse, expected string) error {
+	status, err := nestedString(response.Body, "status")
+	if err != nil {
+		return err
+	}
+	if status != expected {
+		return fmt.Errorf("plan status = %q, expected %q: %s", status, expected, response.Raw)
+	}
+	return nil
+}
+
 func (h *harness) rejectedCase(tag string) (string, error) {
 	deviceID, err := h.createDevice(tag)
 	if err != nil {
@@ -549,6 +987,18 @@ func nestedBool(root map[string]any, path ...any) (bool, error) {
 		return false, fmt.Errorf("%v is not a boolean", path)
 	}
 	return flag, nil
+}
+
+func nestedStringAt(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%v is not a string", path)
+	}
+	return text, nil
 }
 
 func nestedSlice(root map[string]any, key string) ([]any, error) {

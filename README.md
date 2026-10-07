@@ -3,7 +3,9 @@
 Metrology Assurance Suite is a Go HTTP service for bounded laboratory
 measurement assurance work. It registers devices, opens verification cases,
 records measurements, handles failed tolerance decisions, and seals traceable
-evidence records.
+evidence records. Stewards can also plan recalibration ahead of basis expiry:
+a calibration plan carries a window and an owner, schedules are arranged
+inside the window, and completion is recorded against a sealed case.
 
 ## Run
 
@@ -22,6 +24,7 @@ go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
 go run ./cmd/workflowcheck --workflow seal-verification
+go run ./cmd/workflowcheck --workflow calibration-planning
 ```
 
 The workflow runner starts a fresh in-process HTTP service and exercises the
@@ -42,6 +45,19 @@ or extend these smoke checks with red/green verification tests.
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+- `POST /plans`
+- `GET /plans` (optional `device_id` and `status` filters)
+- `GET /plans/{id}`
+- `POST /plans/{id}/revise`
+- `POST /plans/{id}/schedules`
+- `GET /plans/{id}/events`
+- `POST /schedules/{id}/complete`
+- `POST /schedules/{id}/cancel`
+
+Plan responses carry a derived `status` (`pending`, `scheduled`, `overdue`,
+`completed`) and a `status_explanation` so stewards can read upcoming
+workload directly. A schedule snapshots the plan window at creation, so
+revising a plan never rewrites a historical on-time arrangement.
 
 ## Layout
 
