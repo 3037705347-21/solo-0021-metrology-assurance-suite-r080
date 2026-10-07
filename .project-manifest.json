@@ -155,6 +155,30 @@
         "contracts",
         "bootstrap"
       ]
+    },
+    {
+      "id": "plan-calibration-due",
+      "name": "Plan calibration due work",
+      "entry": "POST /plans",
+      "steps": [
+        "register a real calibration basis with a validity window for the device",
+        "create a per-device plan window with an owner and derive pending or overdue status",
+        "arrange the plan only with an active device, no unfinished case, and a currently valid basis",
+        "freeze the arrangement on-time decision at booking time so rescheduling cannot rewrite history",
+        "complete the plan against a sealed same-device case and a currently valid basis"
+      ],
+      "success": "explains pending, scheduled, overdue, and completed status and books only valid arrangements",
+      "failure": "rejects foreign or expired bases, unfinished cases, duplicate arrangements, and unsealed or foreign completion cases",
+      "verification": "workflowcheck drives the full plan lifecycle including overdue derivation, frozen timeliness, and every guard",
+      "module_ids": [
+        "runtimecheck",
+        "httpapi",
+        "assurance",
+        "domain",
+        "repository",
+        "contracts",
+        "bootstrap"
+      ]
     }
   ],
   "complexity": {

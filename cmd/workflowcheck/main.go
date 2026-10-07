@@ -40,6 +40,7 @@ func main() {
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
 		"seal-verification":        checkSealVerification,
+		"plan-calibration-due":     checkPlanCalibrationDue,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -302,6 +303,460 @@ func checkReopenVerificationCase() error {
 		return errors.New("reopen audit event is missing")
 	}
 	return nil
+}
+
+// checkPlanCalibrationDue exercises the calibration due plan lifecycle: a
+// pending window, a frozen on-time arrangement that survives a later window
+// change, an overdue plan whose stored state is never rewritten, and the real
+// device/basis/unfinished-case guards around arranging and completing.
+func checkPlanCalibrationDue() error {
+	h := newHarness()
+	defer h.close()
+
+	past := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+	farPast := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
+	nearFuture := time.Now().Add(72 * time.Hour).Format(time.RFC3339)
+	farFuture := time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	soon := time.Now().Add(48 * time.Hour).Format(time.RFC3339)
+	later := time.Now().Add(96 * time.Hour).Format(time.RFC3339)
+
+	// A real, active device and a currently valid calibration basis.
+	deviceID, err := h.createDevice("MET-2001")
+	if err != nil {
+		return err
+	}
+	basisID, err := h.createBasis(deviceID, "CERT-2001", past, farFuture)
+	if err != nil {
+		return err
+	}
+	if _, err := h.createBasis(deviceID, "cert-2001", past, farFuture); err == nil {
+		return errors.New("duplicate normalized certificate was accepted")
+	}
+
+	// Creating a plan requires the real, currently valid basis.
+	invalidBasis, err := h.request(http.MethodPost, "/plans", map[string]any{
+		"device_id":        deviceID,
+		"basis_id":         "basis-9999",
+		"window_starts_at": past,
+		"window_due_at":    nearFuture,
+		"owner":            "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(invalidBasis, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(invalidBasis, "basis_invalid"); err != nil {
+		return err
+	}
+
+	planID, err := h.createPlan(deviceID, basisID, past, nearFuture, "Lin")
+	if err != nil {
+		return err
+	}
+
+	// Only one open plan per device.
+	duplicate, err := h.request(http.MethodPost, "/plans", map[string]any{
+		"device_id":        deviceID,
+		"basis_id":         basisID,
+		"window_starts_at": past,
+		"window_due_at":    nearFuture,
+		"owner":            "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "active_plan_exists"); err != nil {
+		return err
+	}
+
+	if err := expectPlanStatus(h, planID, "pending"); err != nil {
+		return err
+	}
+
+	// A second device with an already-closed window explains overdue without
+	// any stored state change.
+	overdueDeviceID, err := h.createDevice("MET-2002")
+	if err != nil {
+		return err
+	}
+	overdueBasisID, err := h.createBasis(overdueDeviceID, "CERT-2002", past, farFuture)
+	if err != nil {
+		return err
+	}
+	overduePlanID, err := h.createPlan(overdueDeviceID, overdueBasisID, farPast, past, "Lin")
+	if err != nil {
+		return err
+	}
+	if err := expectPlanStatus(h, overduePlanID, "overdue"); err != nil {
+		return err
+	}
+	stored, err := h.request(http.MethodGet, "/plans/"+overduePlanID, nil)
+	if err != nil {
+		return err
+	}
+	storedState, err := nestedString(stored.Body, "plan", "state")
+	if err != nil {
+		return err
+	}
+	if storedState != "pending" {
+		return fmt.Errorf("overdue explanation rewrote stored state to %q", storedState)
+	}
+	overdueList, err := h.request(http.MethodGet, "/plans?status=overdue", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(overdueList, http.StatusOK); err != nil {
+		return err
+	}
+	if !listContainsPlan(overdueList.Body, overduePlanID) || listContainsPlan(overdueList.Body, planID) {
+		return errors.New("overdue status filter did not return only overdue plans")
+	}
+
+	// An unfinished case blocks an arrangement (no invalid arrangement while
+	// assurance work for the device is already open).
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	blocked, err := h.arrangePlan(planID, soon, "Rui", basisID, "")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blocked, "active_case_exists"); err != nil {
+		return err
+	}
+	conflictingCaseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+
+	// An expired basis cannot back an arrangement.
+	expiredBasisID, err := h.createBasis(overdueDeviceID, "CERT-EXPIRED", farPast, past)
+	if err != nil {
+		return err
+	}
+	expiredArrangement, err := h.arrangePlan(overduePlanID, soon, "Rui", expiredBasisID, "")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(expiredArrangement, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(expiredArrangement, "basis_invalid"); err != nil {
+		return err
+	}
+
+	// Close the blocking case so the on-time arrangement can proceed.
+	if _, err := h.recordMeasurement(conflictingCaseID, 25.2, "Rui"); err != nil {
+		return err
+	}
+	sealed, err := h.request(http.MethodPost, "/cases/"+conflictingCaseID+"/seal", map[string]any{
+		"reviewer": "Verifier",
+		"summary":  "first cycle sealed",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+
+	arranged, err := h.arrangePlan(planID, soon, "Rui", basisID, "")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(arranged, http.StatusCreated); err != nil {
+		return err
+	}
+	status, err := nestedString(arranged.Body, "plan", "status")
+	if err != nil {
+		return err
+	}
+	if status != "scheduled" {
+		return fmt.Errorf("arranged plan status = %q", status)
+	}
+	onTime, err := nestedBool(arranged.Body, "plan", "arrangement", "on_time")
+	if err != nil {
+		return err
+	}
+	if !onTime {
+		return errors.New("arrangement booked before the window closed was not frozen as on time")
+	}
+	reason, err := nestedString(arranged.Body, "plan", "status_reason")
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(reason, "within the plan window") {
+		return fmt.Errorf("scheduled status does not explain the on-time booking: %q", reason)
+	}
+
+	// A second arrangement is rejected.
+	secondArrangement, err := h.arrangePlan(planID, later, "Rui", basisID, "")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(secondArrangement, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(secondArrangement, "state_conflict"); err != nil {
+		return err
+	}
+
+	// Moving the plan window forward must not retroactively rewrite the
+	// historically on-time arrangement, nor reopen the plan.
+	rescheduled, err := h.request(http.MethodPost, "/plans/"+planID+"/reschedule", map[string]any{
+		"window_starts_at": nearFuture,
+		"window_due_at":    farFuture,
+		"owner":            "Mira",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(rescheduled, http.StatusOK); err != nil {
+		return err
+	}
+	stillOnTime, err := nestedBool(rescheduled.Body, "plan", "arrangement", "on_time")
+	if err != nil {
+		return err
+	}
+	if !stillOnTime {
+		return errors.New("plan change retroactively rewrote an on-time arrangement")
+	}
+	stillScheduled, err := nestedString(rescheduled.Body, "plan", "state")
+	if err != nil {
+		return err
+	}
+	if stillScheduled != "scheduled" {
+		return fmt.Errorf("rescheduling changed stored plan state to %q", stillScheduled)
+	}
+
+	// Completion requires a sealed recalibration case for the same device.
+	unsealedDeviceID, err := h.createDevice("MET-2003")
+	if err != nil {
+		return err
+	}
+	unsealedBasisID, err := h.createBasis(unsealedDeviceID, "CERT-2003", past, farFuture)
+	if err != nil {
+		return err
+	}
+	unsealedPlanID, err := h.createPlan(unsealedDeviceID, unsealedBasisID, past, nearFuture, "Lin")
+	if err != nil {
+		return err
+	}
+	unsealedCase, err := h.openCaseFor(unsealedDeviceID)
+	if err != nil {
+		return err
+	}
+	unsealedCaseID, err := nestedString(unsealedCase.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	if blockedArrangement, err := h.arrangePlan(unsealedPlanID, soon, "Rui", unsealedBasisID, unsealedCaseID); err != nil {
+		return fmt.Errorf("arrange request failed: %w", err)
+	} else if err := expectStatus(blockedArrangement, http.StatusConflict); err != nil {
+		return err
+	}
+	if _, err := h.recordMeasurement(unsealedCaseID, 25.2, "Rui"); err != nil {
+		return err
+	}
+	if _, err := h.request(http.MethodPost, "/cases/"+unsealedCaseID+"/seal", map[string]any{
+		"reviewer": "Verifier",
+		"summary":  "sealed for plan completion",
+	}); err != nil {
+		return err
+	}
+
+	// Back on the main device: run the recalibration cycle through sealing and
+	// register a renewed, still-valid basis.
+	recalibratedCase, err := h.openCaseFor(deviceID)
+	if err != nil {
+		return err
+	}
+	recalibratedCaseID, err := nestedString(recalibratedCase.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	if _, err := h.recordMeasurement(recalibratedCaseID, 25.1, "Rui"); err != nil {
+		return err
+	}
+	if _, err := h.request(http.MethodPost, "/cases/"+recalibratedCaseID+"/seal", map[string]any{
+		"reviewer": "Verifier",
+		"summary":  "recalibration sealed",
+	}); err != nil {
+		return err
+	}
+	renewedBasisID, err := h.createBasis(deviceID, "CERT-2001-R", past, farFuture)
+	if err != nil {
+		return err
+	}
+
+	// A foreign device's sealed case cannot complete the plan.
+	foreign, err := h.request(http.MethodPost, "/plans/"+planID+"/completions", map[string]any{
+		"case_id":  unsealedCaseID,
+		"basis_id": renewedBasisID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(foreign, http.StatusBadRequest); err != nil {
+		return err
+	}
+
+	completed, err := h.request(http.MethodPost, "/plans/"+planID+"/completions", map[string]any{
+		"case_id":  recalibratedCaseID,
+		"basis_id": renewedBasisID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(completed, http.StatusCreated); err != nil {
+		return err
+	}
+	completedStatus, err := nestedString(completed.Body, "plan", "status")
+	if err != nil {
+		return err
+	}
+	if completedStatus != "completed" {
+		return fmt.Errorf("completed plan status = %q", completedStatus)
+	}
+
+	// A completed plan is frozen: further window changes are rejected.
+	again, err := h.request(http.MethodPost, "/plans/"+planID+"/reschedule", map[string]any{
+		"window_starts_at": nearFuture,
+		"window_due_at":    farFuture,
+		"owner":            "Mira",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(again, http.StatusConflict); err != nil {
+		return err
+	}
+
+	// The audit trail explains every meaningful plan change.
+	events, err := h.request(http.MethodGet, "/plans/"+planID+"/events", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(events, http.StatusOK); err != nil {
+		return err
+	}
+	for _, kind := range []string{
+		"calibration_plan_created",
+		"calibration_plan_arranged",
+		"calibration_plan_rescheduled",
+		"calibration_plan_completed",
+	} {
+		if !hasEvent(events.Body, kind) {
+			return fmt.Errorf("plan audit event %q is missing", kind)
+		}
+	}
+	return nil
+}
+
+func (h *harness) createBasis(deviceID, certificate, effective, expires string) (string, error) {
+	response, err := h.request(http.MethodPost, "/calibration-bases", map[string]any{
+		"device_id":          deviceID,
+		"certificate_number": certificate,
+		"issuer":             "Metrology Lab",
+		"effective_at":       effective,
+		"expires_at":         expires,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return nestedString(response.Body, "basis", "id")
+}
+
+func (h *harness) createPlan(deviceID, basisID, starts, due, owner string) (string, error) {
+	response, err := h.request(http.MethodPost, "/plans", map[string]any{
+		"device_id":        deviceID,
+		"basis_id":         basisID,
+		"window_starts_at": starts,
+		"window_due_at":    due,
+		"owner":            owner,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return nestedString(response.Body, "plan", "id")
+}
+
+func (h *harness) arrangePlan(planID, scheduledFor, assignee, basisID, caseID string) (apiResponse, error) {
+	body := map[string]any{
+		"scheduled_for": scheduledFor,
+		"assignee":      assignee,
+		"basis_id":      basisID,
+	}
+	if caseID != "" {
+		body["case_id"] = caseID
+	}
+	return h.request(http.MethodPost, "/plans/"+planID+"/arrangements", body)
+}
+
+func (h *harness) openCaseFor(deviceID string) (apiResponse, error) {
+	response, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": deviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return apiResponse{}, err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return apiResponse{}, err
+	}
+	return response, nil
+}
+
+func expectPlanStatus(h *harness, planID, expected string) error {
+	response, err := h.request(http.MethodGet, "/plans/"+planID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(response, http.StatusOK); err != nil {
+		return err
+	}
+	status, err := nestedString(response.Body, "plan", "status")
+	if err != nil {
+		return err
+	}
+	if status != expected {
+		return fmt.Errorf("plan %s status = %q, expected %q", planID, status, expected)
+	}
+	return nil
+}
+
+func listContainsPlan(root map[string]any, planID string) bool {
+	items, err := nestedSlice(root, "plans")
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		plan, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if plan["id"] == planID {
+			return true
+		}
+	}
+	return false
 }
 
 func checkSealVerification() error {

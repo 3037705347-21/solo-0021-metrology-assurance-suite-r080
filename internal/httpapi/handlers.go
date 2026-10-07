@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"example.com/solo-0021-metrology-assurance-suite/internal/contracts"
+	"example.com/solo-0021-metrology-assurance-suite/internal/domain"
 )
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
@@ -105,4 +106,113 @@ func (s *Server) events(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
+}
+
+func (s *Server) registerBasis(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RegisterBasisRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	basis, err := s.service.RegisterBasis(request.Context(), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, contracts.BasisResponse{Basis: basis})
+}
+
+func (s *Server) deviceBases(writer http.ResponseWriter, request *http.Request) {
+	items, err := s.service.DeviceBases(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	if items == nil {
+		items = []domain.CalibrationBasis{}
+	}
+	writeJSON(writer, http.StatusOK, contracts.BasesResponse{Bases: items})
+}
+
+func (s *Server) createPlan(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CreatePlanRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CreatePlan(request.Context(), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) planView(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.Plan(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) listPlans(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.ListPlans(request.Context(), request.URL.Query().Get("status"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) arrangePlan(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.ArrangePlanRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.ArrangePlan(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) completePlan(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CompletePlanRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CompletePlan(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) reschedulePlan(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.ReschedulePlanRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.ReschedulePlan(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) planEvents(writer http.ResponseWriter, request *http.Request) {
+	items, err := s.service.PlanEvents(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: items})
 }

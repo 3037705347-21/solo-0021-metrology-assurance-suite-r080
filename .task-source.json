@@ -52,6 +52,37 @@
         "only an accepted measurement may be selected",
         "the smallest absolute deviation wins when several accepted measurements exist"
       ]
+    },
+    {
+      "id": "calibration_basis",
+      "label": "Calibration basis",
+      "relations": [
+        "calibration_basis.device_id belongs_to device.id",
+        "calibration_plan.basis_id belongs_to calibration_basis.id"
+      ],
+      "invariants": [
+        "certificate number is unique per device after trim and upper-casing",
+        "effective_at is strictly before expires_at",
+        "the basis is usable only when now is inside the validity window; the expiry instant is expired"
+      ]
+    },
+    {
+      "id": "calibration_plan",
+      "label": "Calibration plan",
+      "relations": [
+        "calibration_plan.device_id belongs_to device.id",
+        "calibration_plan.basis_id belongs_to calibration_basis.id",
+        "plan_completion.case_id belongs_to verification_case.id"
+      ],
+      "invariants": [
+        "a device has at most one open plan",
+        "the cited basis must be real, owned by the device, and currently valid",
+        "arrangement requires an active device with no unfinished case and a currently valid basis",
+        "arrangement on_time is frozen at booking against the window then in effect",
+        "plan window changes never mutate the frozen arrangement snapshot",
+        "completion requires a sealed case for the same device and a currently valid basis",
+        "completed is terminal"
+      ]
     }
   ],
   "state_machines": [
@@ -86,6 +117,25 @@
         "sealed does not transition again",
         "each transition increments version",
         "case mutation and audit event share one atomic commit"
+      ]
+    },
+    {
+      "subject": "calibration_plan",
+      "states": [
+        "pending",
+        "scheduled",
+        "completed",
+        "overdue"
+      ],
+      "transitions": [
+        "pending->scheduled",
+        "scheduled->completed"
+      ],
+      "invariants": [
+        "overdue is derived at read time from a pending plan whose window closed; it is never stored",
+        "rescheduling changes only window and owner, never the frozen arrangement",
+        "completed is terminal and cannot be rescheduled or completed again",
+        "plan mutation and audit event share one atomic commit"
       ]
     }
   ],
@@ -189,6 +239,21 @@
       "workflow_id": "seal-verification",
       "description": "Concurrent reviewers may both observe a ready case; only an atomic commit that rechecks state and seal uniqueness permits one seal",
       "observable_failure": "two seals are created, or the response claims success while no sealed case is readable"
+    },
+    {
+      "workflow_id": "plan-calibration-due",
+      "description": "Arrangement timeliness can be recomputed against the current window on every read, or frozen once against the window in effect at booking time; only freezing prevents later plan changes from rewriting a historically on-time booking into a late one",
+      "observable_failure": "rescheduling a plan changes arrangement.on_time or turns a completed on-time booking into an overdue one"
+    },
+    {
+      "workflow_id": "plan-calibration-due",
+      "description": "Overdue can be stored as a state or derived from a pending plan and the clock; only deriving it keeps an auditable history and lets the same plan become overdue without a retroactive mutation",
+      "observable_failure": "a plan's stored state flips to overdue, or moving the window mutates previously reported status"
+    },
+    {
+      "workflow_id": "plan-calibration-due",
+      "description": "An arrangement can trust a basis reference supplied in the request or revalidate that the basis exists, belongs to the device, and is currently valid inside the atomic commit; only revalidation prevents invalid arrangements under an expired basis or an unfinished case",
+      "observable_failure": "an arrangement or completion exists for a retired device, a foreign or expired basis, or an unfinished case"
     }
   ]
 }
